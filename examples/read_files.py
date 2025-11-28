@@ -1,5 +1,6 @@
 from utils.file_processor import FileProcessor
 from utils.angle_calculator import calculate_angles,calculate_solar_power
+from utils.utils import time_alignment
 import pandas as pd
 # 定义数据配置
 DATA_CONFIGS = {
@@ -69,7 +70,6 @@ def process_satellite_data(data_type, start_date, end_date, root_path="G:/实验
     # 处理可能的NaN值
     break_points = break_points.fillna(False)
     df['segment'] = break_points.cumsum()
-
     # 保存数据
     output_path = config['output_path']
     success = file_processor.save_dataframe(df, output_path, "parquet")
@@ -94,24 +94,12 @@ def attitude_data(start_date, end_date):
 if __name__ == '__main__':
     start_date = "20140916"
     end_date = "20211209"
-    # ## 1.处理状态数据
-    # state_data(start_date, end_date)
-    # ## 2.处理位置数据
-    # df = position_data(start_date, end_date)
-    # df = calculate_angles(df)
-    # df.to_parquet("./position_data.parquet")
-    # ## 3.处理姿态数据
-    # attitude_data(start_date, end_date)
-
-    df_position = pd.read_parquet('./position_data.parquet')
-    df_attitude = pd.read_parquet('./attitude_data.parquet')
-    df_state = pd.read_parquet('./state_data.parquet')
-    from utils.utils import time_alignment
-    position_precise, attitude_precise, state_precise = time_alignment(df_position, df_attitude, df_state)
-    #将"姿态四元数Q1", "姿态四元数Q2", "姿态四元数Q3", "姿态四元数Q4" 加到position_precise中
-    position_precise = position_precise.join(attitude_precise[["姿态四元数Q1", "姿态四元数Q2", "姿态四元数Q3", "姿态四元数Q4"]]).reset_index(drop=True)
-    df = calculate_solar_power(position_precise)
-    # 保存结果
-    df.to_parquet("./power_data.parquet")
-
+    ## 1.处理状态数据
+    state_data(start_date, end_date)
+    ## 2.处理位置数据
+    df = position_data(start_date, end_date)
+    df = calculate_angles(df)
+    df.to_parquet("./position_data.parquet")
+    ## 3.处理姿态数据
+    attitude_data(start_date, end_date)
 

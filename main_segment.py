@@ -1,0 +1,318 @@
+from dataset.SegmentDataset import SegmentDataset
+from model.EnhancedTrainer import EnhancedSegmentPINNTrainer,EnhancedSegmentTrainer, PhysicsModelTrainer
+from model.segment_nn import SolarHealthModel, SimpleSolarModel, GRUSolarModel, CNNLSTMSolarModel, TransformerSolarModel
+from model.segment_pinn import PhysicsInformedSolarHealthModel, PhysicsInformedSolarHealthModelNoDegradation
+from model.segment_pinn import NeuralODEHealthModel, TransformerNeuralODE
+from model.segment_physics import PhysicsOnlyModel
+from model.ml_models import MLRandomForest, MLSVM, MLLinearRegression, convert_torch_dataset_to_numpy, evaluate_ml_model, save_ml_test_results
+from utils.utils import set_random_seed, save_code
+from torch.utils.data import DataLoader
+from utils.args import get_args
+import random
+import torch
+import os
+
+def create_data_loaders(args):
+    """创建数据加载器"""
+    print("数据集加载...")
+
+    dataset = SegmentDataset(data_dir='./data', normalize=False)
+    train_size = int(0.8 * len(dataset))
+    val_size = int(0.1 * len(dataset))
+    test_size = len(dataset) - train_size - val_size
+    
+    if args.few_shot:
+        # Few-shot learning: randomly sample a small subset for training
+        print("使用小样本训练模式")
+        few_shot_size = max(int(0.2 * train_size), 50)  # Use 20% of training data or 50 samples, whichever is smaller
+        print(f"小样本数量: {few_shot_size}")
+        
+        # Randomly select few-shot samples from the training set
+        full_train_indices = list(range(0, train_size)) if not args.shuffle_data else list(range(len(dataset)))[:train_size]
+        few_shot_indices = random.sample(full_train_indices, few_shot_size)
+        
+        if args.shuffle_data:
+            # 随机打乱数据集
+            indices = list(range(len(dataset)))
+            random.shuffle(indices)
+            
+            # Split the shuffled indices
+            train_indices = few_shot_indices  # Use the few-shot sampled indices
+            val_indices = indices[train_size:train_size + val_size]
+            test_indices = indices[train_size + val_size:]
+        else:
+            # 按时间顺序划分数据集
+            train_indices = few_shot_indices  # Use the few-shot sampled indices
+            val_indices = list(range(train_size, train_size + val_size))
+            test_indices = list(range(train_size + val_size, len(dataset)))
+    else:
+        if args.shuffle_data:
+            # 随机打乱数据集
+            indices = list(range(len(dataset)))
+            random.shuffle(indices)
+            
+            train_indices = indices[:train_size]
+            val_indices = indices[train_size:train_size + val_size]
+            test_indices = indices[train_size + val_size:]
+        else:
+            # 按时间顺序划分数据集
+            train_indices = list(range(0, train_size))
+            val_indices = list(range(train_size, train_size + val_size))
+            test_indices = list(range(train_size + val_size, len(dataset)))
+    
+    train_dataset = torch.utils.data.Subset(dataset, train_indices)
+    val_dataset = torch.utils.data.Subset(dataset, val_indices)
+    test_dataset = torch.utils.data.Subset(dataset, test_indices)
+    
+    # 现在仅基于训练集计算归一化参数，避免数据泄露
+    dataset.compute_normalization_params(indices=train_indices)
+    
+    # 对所有数据集应用相同地归一化参数
+    dataset.prepare_all_features()  # 重新处理特征并应用归一化
+    
+    # 为需要原始特征的模型创建支持原始特征的数据集包装器
+    if args.model_type in ['segment_pinn', 'neural_ode', 'transformer_neural_ode', 'cnn_gru_neural_ode', 'segment_pinn_nodegradation', 'physics_model']:
+        # 为训练器创建支持原始特征的数据集包装器
+        class RawFeatureDatasetWrapper(torch.utils.data.Dataset):
+            def __init__(self, dataset, indices):
+                self.dataset = dataset
+                self.indices = indices
+            def __len__(self):
+                return len(self.indices)
+            def __getitem__(self, idx):
+                # 获取包含原始特征的数据
+                normalized_features, raw_features, label, day_id = self.dataset.get_item_with_raw_features(self.indices[idx])
+                return normalized_features, raw_features, label, day_id
+
+        # 创建包装后的数据集
+        train_dataset_with_raw = RawFeatureDatasetWrapper(dataset, train_dataset.indices)
+        val_dataset_with_raw = RawFeatureDatasetWrapper(dataset, val_dataset.indices)
+        test_dataset_with_raw = RawFeatureDatasetWrapper(dataset, test_dataset.indices)
+
+        # 创建数据加载器
+        train_loader = DataLoader(train_dataset_with_raw, batch_size=args.train_batch_size, shuffle=True)
+        val_loader = DataLoader(val_dataset_with_raw, batch_size=args.val_batch_size, shuffle=False)
+        test_loader = DataLoader(test_dataset_with_raw, batch_size=args.test_batch_size, shuffle=False)
+    elif args.model_type in ['segment', 'simple_segment', 'gru_segment', 'cnn_lstm_segment', 'transformer_segment']:
+        # 对于其他模型，直接使用普通的DataLoader
+        train_loader = DataLoader(train_dataset, batch_size=args.train_batch_size, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=args.val_batch_size, shuffle=False)
+        test_loader = DataLoader(test_dataset, batch_size=args.test_batch_size, shuffle=False)
+    elif args.model_type in ['ml_rf', 'ml_svm', 'ml_lr']:
+        # 对于机器学习模型，不需要DataLoader
+        train_loader = train_dataset
+        val_loader = val_dataset
+        test_loader = test_dataset
+    else:
+        raise ValueError(f"Invalid model type: {args.model_type}")
+    return train_loader, val_loader, test_loader, dataset
+
+
+def create_model(args, dataset):
+    """创建模型"""
+    if args.model_type == 'segment_pinn':
+        model = PhysicsInformedSolarHealthModel(
+            num_days=dataset.num_days,
+            input_dim=dataset.F,
+        )
+    elif args.model_type == 'segment_pinn_nodegradation':  # 新增不带退化因子的模型选项
+        model = PhysicsInformedSolarHealthModelNoDegradation(
+            num_days=dataset.num_days,
+            input_dim=dataset.F,
+        )
+    elif args.model_type == 'neural_ode':  # Added Neural ODE model option
+        model = NeuralODEHealthModel(
+            num_days=dataset.num_days,
+            input_dim=dataset.F,
+            lstm_hidden_dim=args.lstm_hidden_dim,
+            lstm_layers=args.lstm_layers,
+            health_dim=args.health_dim,
+            feat_hidden_dim=args.feat_hidden_dim,
+        )
+    elif args.model_type == 'transformer_neural_ode':  # 新增Transformer Neural ODE模型选项
+        model = TransformerNeuralODE(
+            num_days=dataset.num_days,
+            input_dim=dataset.F,
+            d_model=args.transformer_d_model,
+            nhead=args.transformer_nhead,
+            num_layers=args.transformer_num_layers,
+            health_dim=args.health_dim,
+            feat_hidden_dim=args.feat_hidden_dim,
+        )
+    elif args.model_type == 'physics_model':  # 新增纯物理模型选项
+        model = PhysicsOnlyModel(num_days=dataset.num_days)
+    elif args.model_type == 'segment':
+        model = SolarHealthModel(
+            num_days=dataset.num_days,
+            input_dim=dataset.F,
+        )
+    elif args.model_type == 'simple_segment':
+        model = SimpleSolarModel(
+            num_days=dataset.num_days,
+            input_dim=dataset.F,
+        )
+    elif args.model_type == 'gru_segment':
+        model = GRUSolarModel(
+            num_days=dataset.num_days,
+            input_dim=dataset.F,
+            gru_hidden_dim=args.gru_hidden_dim,
+            gru_layers=args.gru_layers,
+        )
+    elif args.model_type == 'cnn_lstm_segment':
+        model = CNNLSTMSolarModel(
+            num_days=dataset.num_days,
+            input_dim=dataset.F,
+            cnn_channels=args.cnn_channels,
+            cnn_kernel_size=args.cnn_kernel_size,
+            lstm_hidden_dim=args.lstm_hidden_dim,
+            lstm_layers=args.lstm_layers,
+        )
+    elif args.model_type == 'transformer_segment':
+        model = TransformerSolarModel(
+            num_days=dataset.num_days,
+            input_dim=dataset.F,
+            d_model=args.transformer_d_model,
+            nhead=args.transformer_nhead,
+            num_layers=args.transformer_num_layers,
+            dim_feedforward=args.transformer_dim_feedforward,
+            dropout=args.transformer_dropout,
+        )
+    elif args.model_type == 'ml_rf':
+        model = MLRandomForest(n_estimators=100, random_state=42)
+    elif args.model_type == 'ml_svm':
+        model = MLSVM(kernel='rbf', C=1.0)
+    elif args.model_type == 'ml_lr':
+        model = MLLinearRegression()
+    else:
+        raise ValueError(f"Invalid model type: {args.model_type}")
+    return model
+
+def create_trainer(args, model, device):
+    """创建训练器"""
+    if args.model_type in ['segment_pinn', 'segment_pinn_nodegradation', 'neural_ode', 'transformer_neural_ode', 'cnn_gru_neural_ode']:
+        trainer = EnhancedSegmentPINNTrainer(model, save_path=args.save_path, device=device)
+    elif args.model_type in ['segment', 'simple_segment', 'gru_segment', 'cnn_lstm_segment', 'transformer_segment']:
+        trainer = EnhancedSegmentTrainer(model, save_path=args.save_path, device=device)
+    elif args.model_type == 'physics_model':
+        # 物理模型使用专用训练器
+        trainer = PhysicsModelTrainer(model, save_path=args.save_path, device=device)
+    else:
+        trainer = None
+    return trainer
+
+def train_and_evaluate(args, trainer, train_loader, val_loader, test_loader, model, dataset):
+    """训练和评估模型"""
+    # 创建训练配置
+    
+    if args.model_type in ['ml_rf', 'ml_svm', 'ml_lr']:
+        # 处理机器学习模型
+        print("开始训练传统机器学习模型...")
+        
+        # 转换训练数据
+        X_train, y_train = convert_torch_dataset_to_numpy(train_loader)
+        X_val, y_val = convert_torch_dataset_to_numpy(val_loader)
+        X_test, y_test = convert_torch_dataset_to_numpy(test_loader)
+        
+        # 训练模型
+        model.fit(X_train, y_train)
+        
+        # 评估模型
+        train_results = evaluate_ml_model(model, X_train, y_train)
+        val_results = evaluate_ml_model(model, X_val, y_val)
+        test_results = evaluate_ml_model(model, X_test, y_test)
+        
+        print("\n训练集结果:")
+        print(f"训练损失: {train_results['test_loss']:.6f}")
+        print(f"均方误差 (MSE): {train_results['mse']:.6f}")
+        print(f"均方根误差 (RMSE): {train_results['rmse']:.6f}")
+        print(f"平均绝对误差 (MAE): {train_results['mae']:.6f}")
+        print(f"平均绝对百分比误差 (MAPE): {train_results['mape']:.6f}")
+        print(f"决定系数 (R²): {train_results['r2']:.6f}")
+        
+        print("\n验证集结果:")
+        print(f"验证损失: {val_results['test_loss']:.6f}")
+        print(f"均方误差 (MSE): {val_results['mse']:.6f}")
+        print(f"均方根误差 (RMSE): {val_results['rmse']:.6f}")
+        print(f"平均绝对误差 (MAE): {val_results['mae']:.6f}")
+        print(f"平均绝对百分比误差 (MAPE): {val_results['mape']:.6f}")
+        print(f"决定系数 (R²): {val_results['r2']:.6f}")
+        
+        print("\n测试集结果:")
+        print(f"测试损失: {test_results['test_loss']:.6f}")
+        print(f"均方误差 (MSE): {test_results['mse']:.6f}")
+        print(f"均方根误差 (RMSE): {test_results['rmse']:.6f}")
+        print(f"平均绝对误差 (MAE): {test_results['mae']:.6f}")
+        print(f"平均绝对百分比误差 (MAPE): {test_results['mape']:.6f}")
+        print(f"决定系数 (R²): {test_results['r2']:.6f}")
+        
+        # 保存模型
+        model_path = os.path.join(args.save_path, f'{args.model_type}_model.pkl')
+        model.save_model(model_path)
+        print(f"\n模型已保存至: {model_path}")
+        
+        # 保存测试结果
+        save_ml_test_results(args.save_path, test_results, y_test)
+        print(f"\n测试结果已保存至: {args.save_path}")
+        
+        return None, test_results
+    else:
+        print("开始训练...")
+            
+        history = trainer.train(
+            train_loader=train_loader,
+            val_loader=val_loader,
+            config=args
+        )
+        
+        # 绘制损失曲线
+        if args.show_plot:
+            trainer.plot_losses()
+        
+        # 测试模型
+        print("\n开始测试模型...")
+        if args.model_type == 'physics_model':
+            test_results = trainer.test(test_loader, config=args)
+        else:
+            test_results = trainer.test(test_loader, args)
+        
+        # 打印详细的测试结果
+        print("\n详细测试结果:")
+        print(f"测试损失: {test_results['test_loss']:.6f}")
+        print(f"均方误差 (MSE): {test_results['mse']:.6f}")
+        print(f"均方根误差 (RMSE): {test_results['rmse']:.6f}")
+        print(f"平均绝对误差 (MAE): {test_results['mae']:.6f}")
+        print(f"平均绝对百分比误差 (MAPE): {test_results['mape']:.6f}")
+        print(f"决定系数 (R²): {test_results['r2']:.6f}")
+        
+        # 绘制退化曲线（仅适用于特定模型）
+        if args.show_plot and (args.model_type in ['segment_pinn', 'neural_ode']):
+            trainer.plot_degradation_curve()
+        
+        return history, test_results
+
+def main():
+    args = get_args()
+    set_random_seed(args.seed)
+    save_code(args.save_path)
+    
+    # 设置设备
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"使用设备: {device}")
+    
+    # 创建数据加载器
+    train_loader, val_loader, test_loader, dataset = create_data_loaders(args)
+    
+    # 创建模型
+    model = create_model(args, dataset)
+    
+    # 创建训练器
+    trainer = create_trainer(args, model, device)
+    
+    # 训练和评估模型
+    history, test_results = train_and_evaluate(args, trainer, train_loader, val_loader, test_loader, model, dataset)
+
+    return model, history, test_results
+
+
+if __name__ == "__main__":
+    main()
