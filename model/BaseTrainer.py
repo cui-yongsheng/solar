@@ -501,7 +501,7 @@ class BaseTrainer:
         if plot_predictions:
             plt.show()
 
-    def plot_losses(self, plot_predictions=True):
+    def plot_losses(self, show_plot=True):
         """
         绘制训练和验证损失曲线
         """
@@ -515,5 +515,5 @@ class BaseTrainer:
         plt.grid(True)
         if self.save_path:
             plt.savefig(os.path.join(self.save_path, 'training_loss.png'), dpi=300, bbox_inches='tight')
-        if plot_predictions:
+        if show_plot:
             plt.show()
