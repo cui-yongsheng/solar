@@ -1,3 +1,5 @@
+import numpy as np
+from sklearn.model_selection import TimeSeriesSplit
 from dataset.SegmentDataset import SegmentDataset
 from model.EnhancedTrainer import EnhancedSegmentPINNTrainer,EnhancedSegmentTrainer, PhysicsModelTrainer
 from model.segment_nn import SolarHealthModel, SimpleSolarModel, GRUSolarModel, CNNLSTMSolarModel, TransformerSolarModel
@@ -6,7 +8,7 @@ from model.segment_pinn import NeuralODEHealthModel, TransformerNeuralODE
 from model.segment_physics import PhysicsOnlyModel
 from model.ml_models import MLRandomForest, MLSVM, MLLinearRegression, convert_torch_dataset_to_numpy, evaluate_ml_model, save_ml_test_results
 from utils.utils import set_random_seed, save_code
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from utils.args import get_args
 import random
 import torch
@@ -81,8 +83,8 @@ def create_data_loaders(args):
                 return len(self.indices)
             def __getitem__(self, idx):
                 # 获取包含原始特征的数据
-                normalized_features, raw_features, label, day_id = self.dataset.get_item_with_raw_features(self.indices[idx])
-                return normalized_features, raw_features, label, day_id
+                normalized_features, raw_features, label, day_id, mask = self.dataset.get_item_with_raw_features(self.indices[idx])
+                return normalized_features, raw_features, label, day_id, mask
 
         # 创建包装后的数据集
         train_dataset_with_raw = RawFeatureDatasetWrapper(dataset, train_dataset.indices)
@@ -200,6 +202,140 @@ def create_trainer(args, model, device):
         trainer = None
     return trainer
 
+def perform_cross_validation(args, dataset, device):
+    """执行时间序列交叉验证"""
+    print("执行时间序列交叉验证...")
+    
+    # 获取完整的数据集索引
+    all_indices = np.array(list(range(len(dataset))))
+    
+    # 初始化TimeSeriesSplit
+    tscv = TimeSeriesSplit(n_splits=args.n_splits)
+    
+    # 存储每次交叉验证的结果
+    cv_results = []
+    
+    # 为每次交叉验证创建模型和训练器
+    for fold, (train_indices, val_indices) in enumerate(tscv.split(all_indices)):
+        print(f"\n执行第 {fold + 1} 折交叉验证...")
+        
+        # 转换索引为列表格式
+        train_indices_list = train_indices.tolist()
+        val_indices_list = val_indices.tolist()
+        
+        # 创建训练集和验证集
+        train_dataset = Subset(dataset, train_indices_list)
+        val_dataset = Subset(dataset, val_indices_list)
+        
+        # 计算归一化参数（仅基于训练集）
+        dataset.compute_normalization_params(indices=train_indices_list)
+        dataset.prepare_all_features()
+        
+        # 创建数据加载器
+        if args.model_type in ['segment_pinn', 'neural_ode', 'transformer_neural_ode', 'cnn_gru_neural_ode', 'segment_pinn_nodegradation', 'physics_model']:
+            class RawFeatureDatasetWrapper(torch.utils.data.Dataset):
+                def __init__(self, dataset, indices):
+                    self.dataset = dataset
+                    self.indices = indices
+                def __len__(self):
+                    return len(self.indices)
+                def __getitem__(self, idx):
+                    normalized_features, raw_features, label, day_id, mask = self.dataset.get_item_with_raw_features(self.indices[idx])
+                    return normalized_features, raw_features, label, day_id, mask
+
+            train_dataset_with_raw = RawFeatureDatasetWrapper(dataset, train_dataset.indices)
+            val_dataset_with_raw = RawFeatureDatasetWrapper(dataset, val_dataset.indices)
+
+            train_loader = DataLoader(train_dataset_with_raw, batch_size=args.train_batch_size, shuffle=True)
+            val_loader = DataLoader(val_dataset_with_raw, batch_size=args.val_batch_size, shuffle=False)
+        elif args.model_type in ['segment', 'simple_segment', 'gru_segment', 'cnn_lstm_segment', 'transformer_segment']:
+            train_loader = DataLoader(train_dataset, batch_size=args.train_batch_size, shuffle=True)
+            val_loader = DataLoader(val_dataset, batch_size=args.val_batch_size, shuffle=False)
+        else:
+            raise ValueError(f"不支持交叉验证的模型类型: {args.model_type}")
+        
+        # 创建模型和训练器
+        model = create_model(args, dataset)
+        trainer = create_trainer(args, model, device)
+        
+        if trainer is None:
+            raise ValueError(f"无法为模型类型 {args.model_type} 创建训练器")
+        
+        # 训练模型
+        history = trainer.train(
+            train_loader=train_loader,
+            val_loader=val_loader,
+            config=args
+        )
+        
+        # 评估模型
+        val_results = trainer.test(val_loader, config=args)
+        
+        # 存储结果
+        cv_results.append({
+            'fold': fold + 1,
+            'val_loss': val_results['test_loss'],
+            'mse': val_results['mse'],
+            'rmse': val_results['rmse'],
+            'mae': val_results['mae'],
+            'mape': val_results['mape'],
+            'r2': val_results['r2']
+        })
+        
+        print(f"第 {fold + 1} 折验证损失: {val_results['test_loss']:.6f}")
+    
+    # 计算平均结果
+    avg_results = {
+        'avg_val_loss': np.mean([r['val_loss'] for r in cv_results]),
+        'avg_mse': np.mean([r['mse'] for r in cv_results]),
+        'avg_rmse': np.mean([r['rmse'] for r in cv_results]),
+        'avg_mae': np.mean([r['mae'] for r in cv_results]),
+        'avg_mape': np.mean([r['mape'] for r in cv_results]),
+        'avg_r2': np.mean([r['r2'] for r in cv_results]),
+        'std_val_loss': np.std([r['val_loss'] for r in cv_results]),
+        'std_mse': np.std([r['mse'] for r in cv_results]),
+        'std_rmse': np.std([r['rmse'] for r in cv_results]),
+        'std_mae': np.std([r['mae'] for r in cv_results]),
+        'std_mape': np.std([r['mape'] for r in cv_results]),
+        'std_r2': np.std([r['r2'] for r in cv_results])
+    }
+    
+    # 打印交叉验证结果
+    print("\n交叉验证结果:")
+    print("-" * 50)
+    for result in cv_results:
+        print(f"第 {result['fold']} 折 - 验证损失: {result['val_loss']:.6f}, RMSE: {result['rmse']:.6f}")
+    
+    print("-" * 50)
+    print(f"平均验证损失: {avg_results['avg_val_loss']:.6f} ± {avg_results['std_val_loss']:.6f}")
+    print(f"平均MSE: {avg_results['avg_mse']:.6f} ± {avg_results['std_mse']:.6f}")
+    print(f"平均RMSE: {avg_results['avg_rmse']:.6f} ± {avg_results['std_rmse']:.6f}")
+    print(f"平均MAE: {avg_results['avg_mae']:.6f} ± {avg_results['std_mae']:.6f}")
+    print(f"平均MAPE: {avg_results['avg_mape']:.6f} ± {avg_results['std_mape']:.6f}")
+    print(f"平均R²: {avg_results['avg_r2']:.6f} ± {avg_results['std_r2']:.6f}")
+    
+    # 保存交叉验证结果
+    cv_results_file = os.path.join(args.save_path, 'cross_validation_results.txt')
+    with open(cv_results_file, 'w', encoding='utf-8') as f:
+        f.write("交叉验证详细结果:\n")
+        f.write("-" * 50 + "\n")
+        for result in cv_results:
+            f.write(f"第 {result['fold']} 折 - 验证损失: {result['val_loss']:.6f}, "
+                    f"MSE: {result['mse']:.6f}, RMSE: {result['rmse']:.6f}, "
+                    f"MAE: {result['mae']:.6f}, MAPE: {result['mape']:.6f}, R²: {result['r2']:.6f}\n")
+        
+        f.write("-" * 50 + "\n")
+        f.write(f"平均验证损失: {avg_results['avg_val_loss']:.6f} ± {avg_results['std_val_loss']:.6f}\n")
+        f.write(f"平均MSE: {avg_results['avg_mse']:.6f} ± {avg_results['std_mse']:.6f}\n")
+        f.write(f"平均RMSE: {avg_results['avg_rmse']:.6f} ± {avg_results['std_rmse']:.6f}\n")
+        f.write(f"平均MAE: {avg_results['avg_mae']:.6f} ± {avg_results['std_mae']:.6f}\n")
+        f.write(f"平均MAPE: {avg_results['avg_mape']:.6f} ± {avg_results['std_mape']:.6f}\n")
+        f.write(f"平均R²: {avg_results['avg_r2']:.6f} ± {avg_results['std_r2']:.6f}\n")
+    
+    print(f"\n交叉验证结果已保存到: {cv_results_file}")
+    
+    return cv_results, avg_results
+
 def train_and_evaluate(args, trainer, train_loader, val_loader, test_loader, model, dataset):
     """训练和评估模型"""
     # 创建训练配置
@@ -270,10 +406,8 @@ def train_and_evaluate(args, trainer, train_loader, val_loader, test_loader, mod
         
         # 测试模型
         print("\n开始测试模型...")
-        if args.model_type == 'physics_model':
-            test_results = trainer.test(test_loader, config=args)
-        else:
-            test_results = trainer.test(test_loader, args)
+        test_results = trainer.test(test_loader, config=args)
+
         
         # 打印详细的测试结果
         print("\n详细测试结果:")
@@ -298,6 +432,12 @@ def main():
     # 设置设备
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"使用设备: {device}")
+    
+    # 如果启用交叉验证，则执行交叉验证
+    if args.cross_validation:
+        dataset = SegmentDataset(data_dir='./data', normalize=False)
+        cv_results, avg_results = perform_cross_validation(args, dataset, device)
+        return None, None, {'cv_results': cv_results, 'avg_results': avg_results}
     
     # 创建数据加载器
     train_loader, val_loader, test_loader, dataset = create_data_loaders(args)
