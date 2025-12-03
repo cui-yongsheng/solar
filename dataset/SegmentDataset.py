@@ -412,3 +412,15 @@ class SegmentDataset(Dataset):
         self.time_features_raw = time_features_raw
         
         return time_features, time_features_raw
+    
+# 定义RawFeatureDatasetWrapper类
+class RawFeatureDatasetWrapper(torch.utils.data.Dataset):
+    def __init__(self, dataset, indices):
+        self.dataset = dataset
+        self.indices = indices
+    def __len__(self):
+        return len(self.indices)
+    def __getitem__(self, idx):
+        # 获取包含原始特征的数据
+        normalized_features, raw_features, label, day_id, mask = self.dataset.get_item_with_raw_features(self.indices[idx])
+        return normalized_features, raw_features, label, day_id, mask
