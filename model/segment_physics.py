@@ -20,7 +20,7 @@ class PhysicsOnlyModel(nn.Module):
         self.physics_model = SegmentPhysicsModel()
         
         # 注册衰减率参数，初始值设为接近0的小值，表示轻微衰减
-        self.degradation_rate = nn.Parameter(torch.tensor(0.11))
+        self.degradation_rate = nn.Parameter(torch.tensor(0.1))
         
         # 保存总天数
         self.num_days = num_days
@@ -51,7 +51,6 @@ class PhysicsOnlyModel(nn.Module):
         
         # 应用衰减因子
         I_pred = I_pred * degradation_factors  # [B, T, 1]
-        
         return {
             "I_pred": I_pred,
             "I_phys": I_pred,  # 在此模型中，预测值就是物理值
