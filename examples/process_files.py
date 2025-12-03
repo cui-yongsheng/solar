@@ -132,7 +132,6 @@ if __name__ == '__main__':
     attitude_precise.loc[:, 'segment'] = break_points.cumsum()
     state_precise.loc[:, 'segment'] = break_points.cumsum()
 
-
     # 保存为parquet文件
     position_precise.to_parquet('../data/position_precise.parquet', index=False)
     attitude_precise.to_parquet('../data/attitude_precise.parquet', index=False)
