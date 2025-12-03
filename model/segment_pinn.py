@@ -326,8 +326,6 @@ class TransformerNeuralODE(nn.Module):
 
         init_h = self.initial_health.to(device)
 
-        method = "dopri5" if not self.use_adjoint else "adjoint"
-
         traj = odeint(
             func=self._ode_derivative,
             y0=init_h,
@@ -484,8 +482,6 @@ class NeuralODEHealthModel(nn.Module):
         # ------------------------- ODE Cache -------------------------
         # health_table will store the ODE solution for t=0..num_days
         self.register_buffer("health_table", None)  # [num_days+1, H]
-        # 移除参数哈希，因为在训练中它不具备鲁棒性。
-        # self._ode_cached_for_params = None 
 
     # ============================================================
     #                     ODE Derivative (Batch)
@@ -574,14 +570,6 @@ class NeuralODEHealthModel(nn.Module):
         env_seq, _ = self.env_encoder(X)
 
         # ---- 2. Get health state (fast lookup) ----
-        # In a training scenario where gradients are needed, this lookup 
-        # must be performed on a trajectory computed in the same forward pass
-        # or rely on the _compute_full_ode_trajectory's ability to compute gradients.
-        # Since _compute_full_ode_trajectory detaches, this is currently only 
-        # suitable if health is treated as a lookup, not a gradient path.
-        # For full ODE training, you might need to re-run the ODE solver here 
-        # or use a different indexing strategy if the table is kept attached.
-        
         health = self._get_health(day_ids, device)  # [B,H]
         health_seq = health.unsqueeze(1).expand(-1, T, -1) # [B, T, H]
 
