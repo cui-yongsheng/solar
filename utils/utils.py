@@ -6,56 +6,44 @@ import random
 import shutil
 import os
 
-def time_alignment(position_data, attitude_data, state_data, tolerance='1s'):
+def time_alignment(*data_frames, tolerance='1s'):
     """
-    基于时间戳精确对齐数据集
+    基于时间戳精确对齐多个数据集，以第一个数据集为基准
 
     参数:
-    position_data: 位置数据DataFrame
-    attitude_data: 姿态数据DataFrame
-    state_data: 状态数据DataFrame
+    *data_frames: 可变数量的数据DataFrame
     tolerance: 时间容忍度，默认为1秒
 
     返回:
-    aligned_position: 对齐后的位置数据
-    aligned_attitude: 对齐后姿态数据
-    aligned_state: 对齐后状态数据
+    tuple: 对齐后的数据DataFrame元组
     """
-    # 为了避免列名冲突，先保存原始时间列并重命名
-    pos = position_data.copy()
-    att = attitude_data.copy()
-    sta = state_data.copy()
-
-    # 确保时间列是datetime类型并设置为索引
-    pos['时间'] = pd.to_datetime(pos['时间'])
-    att['时间'] = pd.to_datetime(att['时间'])
-    sta['时间'] = pd.to_datetime(sta['时间'])
-
-    # 以位置数据为基准
-    base_times = pos[['时间']].copy()
-
-    # 对齐姿态数据
-    aligned_att = pd.merge_asof(
-        base_times,
-        att,
-        on='时间',
-        direction='nearest',
-        tolerance=pd.Timedelta(tolerance)
-    )
-
-    # 对齐状态数据
-    aligned_sta = pd.merge_asof(
-        base_times,
-        sta,
-        on='时间',
-        direction='nearest',
-        tolerance=pd.Timedelta(tolerance)
-    )
-
-    # 保持位置数据的时间对齐
-    aligned_pos = pos.loc[base_times.index]
-
-    return aligned_pos, aligned_att, aligned_sta
+    if len(data_frames) < 2:
+        raise ValueError("至少需要两个数据集进行对齐")
+    
+    # 复制所有数据帧避免修改原始数据
+    copied_frames = [df.copy() for df in data_frames]
+    
+    # 确保所有数据帧的时间列都是datetime类型
+    for df in copied_frames:
+        df['时间'] = pd.to_datetime(df['时间'])
+    
+    # 以第一个数据集为基准
+    base_times = copied_frames[0][['时间']].copy()
+    
+    # 对齐其余所有数据集
+    aligned_frames = [copied_frames[0]]  # 第一个数据集不需要对齐
+    
+    for i in range(1, len(copied_frames)):
+        aligned_frame = pd.merge_asof(
+            base_times,
+            copied_frames[i],
+            on='时间',
+            direction='nearest',
+            tolerance=pd.Timedelta(tolerance)
+        )
+        aligned_frames.append(aligned_frame)
+    
+    return tuple(aligned_frames)
 
 
 def sun_earth_distance(times):
