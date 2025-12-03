@@ -22,6 +22,12 @@ DATA_CONFIGS = {
         'target_file': None,
         'file_pattern': "{date}ADCS丙2.csv",
         'output_path': "./attitude_data.parquet"
+    },
+    'environment': {
+        'columns': ["时间", "轨道位置X", "轨道位置Y", "轨道位置Z"],
+        'target_file': None,
+        'file_pattern': "{date}ADCS丙1.csv",
+        'output_path': "./environment_data.parquet"
     }
 }
 
@@ -91,6 +97,10 @@ def attitude_data(start_date, end_date):
     """处理姿态数据"""
     return process_satellite_data('attitude', start_date, end_date)
 
+def environment_data(start_date, end_date):
+    """处理环境数据"""
+    return process_satellite_data('environment', start_date, end_date)
+
 if __name__ == '__main__':
     start_date = "20140916"
     end_date = "20211209"
@@ -102,4 +112,6 @@ if __name__ == '__main__':
     df.to_parquet("./position_data.parquet")
     ## 3.处理姿态数据
     attitude_data(start_date, end_date)
+    ## 4.处理环境数据
+    environment_data(start_date, end_date)
 
