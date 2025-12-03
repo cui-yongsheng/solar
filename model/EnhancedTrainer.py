@@ -266,7 +266,7 @@ class EnhancedSegmentPINNTrainer(BaseTrainer):
             
         return result
 
-    def plot_degradation_curve(self, save_path=None):
+    def plot_degradation_curve(self, show_plot):
         """获取D衰减曲线并可选择保存结果
         
         Args:
@@ -291,7 +291,8 @@ class EnhancedSegmentPINNTrainer(BaseTrainer):
             plt.tight_layout()
             default_save_path = os.path.join(self.save_path, "degradation_curve.png")
             plt.savefig(default_save_path, dpi=300, bbox_inches='tight')
-            plt.show()
+            if show_plot:
+                plt.show()
             
         return D_curve_np
 
@@ -400,7 +401,7 @@ class PhysicsModelTrainer(BaseTrainer):
         # 直接使用BaseTrainer的训练方法
         return super().train(train_loader, val_loader, config)
         
-    def plot_degradation_curve(self, save_path=None):
+    def plot_degradation_curve(self, show_plot):
         """
         绘制退化曲线
         
@@ -428,6 +429,7 @@ class PhysicsModelTrainer(BaseTrainer):
             # 保存图像
             default_save_path = os.path.join(self.save_path, "degradation_curve.png") if self.save_path else "degradation_curve.png"
             plt.savefig(default_save_path, dpi=300, bbox_inches='tight')
-            plt.show()
+            if show_plot:
+                plt.show()
             
         return D_curve_np
