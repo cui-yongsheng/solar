@@ -103,7 +103,7 @@ class BaseTrainer:
             
         # 初始化早停机制
         early_stopper = None
-        if config and hasattr(config, 'early_stopping') and config.early_stopping:
+        if config.early_stopping:
             early_stopper = EarlyStopping(
                 patience=getattr(config, 'patience', 10),
                 min_delta=getattr(config, 'min_delta', 1e-4),
@@ -112,7 +112,7 @@ class BaseTrainer:
             )
 
         # 训练模型
-        for epoch in range(config.num_epochs if config else 50):
+        for epoch in range(config.num_epochs):
             # 训练阶段
             train_loss = self._train_epoch(train_loader, optimizer, criterion, config)
 
@@ -129,7 +129,7 @@ class BaseTrainer:
                 early_stop = early_stopper(val_loss, self.model)
             
             # 打印信息
-            if config and getattr(config, 'verbose', False):
+            if config.verbose:
                 print(f'Epoch [{epoch + 1}/{config.num_epochs}]')
                 print(f'  Train Loss: {train_loss:.6f}')
                 print(f'  Val Loss:   {val_loss:.6f}')
@@ -144,18 +144,13 @@ class BaseTrainer:
             
             # 检查是否早停
             if early_stop:
-                if config and getattr(config, 'verbose', False):
-                    print(f"早停触发！在第 {epoch+1} 轮停止训练。")
-                    print(f"最佳验证损失: {early_stopper.best_loss:.6f}")
-                else:
-                    print(f"早停触发！在第 {epoch+1} 轮停止训练。最佳验证损失: {early_stopper.best_loss:.6f}")
+                print(f"早停触发！在第 {epoch+1} 轮停止训练。")
+                print(f"最佳验证损失: {early_stopper.best_loss:.6f}")
                 break
 
         # 保存最终模型
         self._save_model()
-        if config and getattr(config, 'verbose', False):
-            print(f"模型已保存到 {self.save_path}")
-        else:
+        if config.verbose:
             print(f"模型已保存到 {self.save_path}")
 
         return {
@@ -234,7 +229,7 @@ class BaseTrainer:
         """
         raise NotImplementedError("子类必须实现 _compute_loss 方法")
 
-    def test(self, test_loader, plot_predictions=True, save_plots=True, 
+    def test(self, test_loader, plot_predictions=True, 
              save_results=True, config=None, use_best_model=False):
         """
         测试模型
@@ -272,7 +267,7 @@ class BaseTrainer:
             # 用于追踪每个 day_id 的段落计数（用以区分相同 day_id 的不同段落）
             day_segment_counter = {}
             
-            for batch_idx, batch_data in enumerate(test_pbar):
+            for _ , batch_data in enumerate(test_pbar):
                 pred, actual, mask, day_ids, loss = self._predict_and_evaluate(batch_data, criterion, config)
                 test_loss += loss.item()
 
