@@ -14,7 +14,7 @@ def get_args():
     parser = argparse.ArgumentParser(description='Model Arguments')
     
     # 基础训练参数
-    parser.add_argument('--num_epochs', type=int, default=50, help='训练轮数')
+    parser.add_argument('--num_epochs', type=int, default=100, help='训练轮数')
     parser.add_argument('--learning_rate', type=float, default=1e-3, help='学习率')
     parser.add_argument('--optimizer_type', type=str, default="adam",
                               choices=['adam', 'sgd'], help='优化器类型')
@@ -23,6 +23,10 @@ def get_args():
     # 数据集参数
     parser.add_argument('--few_shot', action='store_true', default=False, help='是否使用小样本训练')
     parser.add_argument('--shuffle_data', action='store_true', default=False, help='是否随机打乱数据集')
+    
+    # 交叉验证参数
+    parser.add_argument('--cross_validation', action='store_true', default=True, help='启用时间序列交叉验证')
+    parser.add_argument('--n_splits', type=int, default=5, help='交叉验证折数')
     
     # 模型参数
     parser.add_argument('--model_type', type=str, default='segment_pinn',
@@ -37,7 +41,7 @@ def get_args():
     parser.add_argument('--early_stopping', action='store_true', default=True, help='是否使用早停机制')
     parser.add_argument('--save_best_model', action='store_true', default=True, help='是否保存最佳模型')
     parser.add_argument('--patience', type=int, default=10, help='早停耐心值')
-    parser.add_argument('--min_delta', type=float, default=1e-4, help='早停最小变化量')
+    parser.add_argument('--min_delta', type=float, default=1e-5, help='早停最小变化量')
 
     # 其他参数
     parser.add_argument('--verbose', action='store_true', default=False, help='是否显示结果')
