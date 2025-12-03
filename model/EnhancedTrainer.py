@@ -1,9 +1,8 @@
 from .BaseTrainer import BaseTrainer
 from torch.nn import functional as F
-import torch
-import torch.nn as nn
-import numpy as np
 import matplotlib.pyplot as plt
+import torch.nn as nn
+import torch
 import os
 
 ## 针对点输入时的训练方式
@@ -82,7 +81,6 @@ class EnhancedSegmentTrainer(BaseTrainer):
         
     def _compute_loss(self, batch_data, criterion, config=None):
         """计算分段模型损失"""
-        # 支持 dataset 返回 (data, target, day_ids) 或 (data, target, day_ids, mask)
         data, target, day_ids, mask = batch_data
         data = data.to(self.device)
         target = target.to(self.device)
@@ -135,7 +133,7 @@ class EnhancedSegmentPINNTrainer(BaseTrainer):
     def __init__(self, model, save_path="./", device=torch.device("cpu")):
         super().__init__(model, save_path, device)
 
-    def _compute_loss(self, batch_data, criterion=None, config=None):
+    def _compute_loss(self, batch_data, criterion, config=None):
         normalized_features, raw_features, target, day_ids, mask = batch_data
         normalized_features = normalized_features.to(self.device)
         raw_features = raw_features.to(self.device)
@@ -167,7 +165,7 @@ class EnhancedSegmentPINNTrainer(BaseTrainer):
         # 对r_pred应用mask以只考虑真实位置的残差
         r_pred_masked = r_pred * mask
         res_reg = (r_pred_masked ** 2).sum() / (mask.sum() + eps)
-        lambda_r = getattr(config, 'lambda_r', 1e-2)
+        lambda_r = config.lambda_r
         
         # ============================================================
         # 2) D 的弱监督（帮助 D 收敛）
@@ -203,12 +201,12 @@ class EnhancedSegmentPINNTrainer(BaseTrainer):
                 D_curve_second_diff = D_curve[2:] - 2 * D_curve[1:-1] + D_curve[:-2]
                 D_smooth_loss = D_curve_second_diff.abs().mean()
             # 从配置中获取权重
-            lambda_D_decay = getattr(config, 'lambda_D_decay', 1e-3)
-            lambda_D_smooth = getattr(config, 'lambda_D_smooth', 1e-3)
+            lambda_D_decay = config.lambda_D_decay
+            lambda_D_smooth = config.lambda_D_smooth
             # 应用combined_mask计算损失
             if combined_mask.sum() > 0:
                 loss_D_supervise = F.mse_loss(D[combined_mask], D_tilde[combined_mask])
-                lambda_D_supervise = getattr(config, 'lambda_D_supervise', 1e-2)
+                lambda_D_supervise = config.lambda_D_supervise
                 loss = (
                         data_loss
                         + lambda_D_supervise * loss_D_supervise
