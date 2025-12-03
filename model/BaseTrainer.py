@@ -229,14 +229,14 @@ class BaseTrainer:
         """
         raise NotImplementedError("子类必须实现 _compute_loss 方法")
 
-    def test(self, test_loader, plot_predictions=True, 
-             save_results=True, config=None, use_best_model=False):
+    def test(self, test_loader, show_plot=True, 
+             save_results=True, config=None, use_best_model=True):
         """
         测试模型
 
         参数:
         test_loader: 测试数据加载器
-        plot_predictions: 是否绘制预测结果图
+        show_plot: 是否绘制预测结果图
         save_plots: 是否保存图表
         save_results: 是否保存测试结果到文件
         config: 测试配置
@@ -330,10 +330,10 @@ class BaseTrainer:
         self._print_test_results(test_loss, mse, rmse, mae, r2, mape)
 
         # 绘制预测vs实际值图
-        self._plot_predictions(actuals_flat, predictions_flat, plot_predictions)
+        self._plot_predictions(actuals_flat, predictions_flat, show_plot)
 
         # 绘制误差分布图
-        self._plot_error_distribution(actuals_flat, predictions_flat, plot_predictions)
+        self._plot_error_distribution(actuals_flat, predictions_flat, show_plot)
         
         # 保存测试结果到文件
         if save_results and self.save_path:
@@ -464,7 +464,7 @@ class BaseTrainer:
         print(f'决定系数 (R²):      {r2:.6f}')
         print('=' * 50)
 
-    def _plot_predictions(self, actuals, predictions, plot_predictions=True):
+    def _plot_predictions(self, actuals, predictions, show_plot=True):
         """
         绘制预测值与实际值的对比图
         """
@@ -477,10 +477,10 @@ class BaseTrainer:
         plt.grid(True)
         if self.save_path:
             plt.savefig(os.path.join(self.save_path, 'prediction_vs_actual.png'), dpi=300, bbox_inches='tight')
-        if plot_predictions:
+        if show_plot:
             plt.show()
 
-    def _plot_error_distribution(self, actuals, predictions, plot_predictions=True):
+    def _plot_error_distribution(self, actuals, predictions, show_plot=True):
         """
         绘制误差分布图
         """
@@ -493,7 +493,7 @@ class BaseTrainer:
         plt.grid(True)
         if self.save_path:
             plt.savefig(os.path.join(self.save_path, 'error_distribution.png'), dpi=300, bbox_inches='tight')
-        if plot_predictions:
+        if show_plot:
             plt.show()
 
     def plot_losses(self, show_plot=True):

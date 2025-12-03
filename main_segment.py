@@ -224,7 +224,6 @@ def perform_cross_validation(args, dataset, device):
         if args.model_type in ['segment_pinn', 'neural_ode', 'transformer_neural_ode', 'cnn_gru_neural_ode', 'segment_pinn_nodegradation', 'physics_model']:
             train_dataset_with_raw = RawFeatureDatasetWrapper(dataset, train_dataset.indices)
             val_dataset_with_raw = RawFeatureDatasetWrapper(dataset, val_dataset.indices)
-
             train_loader = DataLoader(train_dataset_with_raw, batch_size=args.train_batch_size, shuffle=True)
             val_loader = DataLoader(val_dataset_with_raw, batch_size=args.val_batch_size, shuffle=False)
         elif args.model_type in ['segment', 'simple_segment', 'gru_segment', 'cnn_lstm_segment', 'transformer_segment']:

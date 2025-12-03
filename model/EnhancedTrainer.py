@@ -37,7 +37,7 @@ class EnhancedNeuralNetworkTrainer(BaseTrainer):
 
     def test(self, test_loader, config=None):
         """测试模型"""
-        return super().test(test_loader, plot_predictions=config.show_plot ,config=config)
+        return super().test(test_loader, show_plot=config.show_plot ,config=config)
 
 class EnhancedPINNTrainer(BaseTrainer):
     def __init__(self, model, save_path="./", device=torch.device("cpu")):
@@ -72,7 +72,7 @@ class EnhancedPINNTrainer(BaseTrainer):
 
     def test(self, test_loader, config=None):
         """测试模型"""
-        return super().test(test_loader, plot_predictions=config.show_plot ,config=config)
+        return super().test(test_loader, show_plot=config.show_plot ,config=config)
 
 ## 针对分段输入时的训练方式
 class EnhancedSegmentTrainer(BaseTrainer):
@@ -126,7 +126,7 @@ class EnhancedSegmentTrainer(BaseTrainer):
 
     def test(self, test_loader, config=None):
         """测试模型"""
-        return super().test(test_loader, plot_predictions=config.show_plot ,config=config)
+        return super().test(test_loader, show_plot=config.show_plot ,config=config)
 
 
 class EnhancedSegmentPINNTrainer(BaseTrainer):
@@ -256,7 +256,7 @@ class EnhancedSegmentPINNTrainer(BaseTrainer):
         if hasattr(self.model, 'enable_cache'):
             self.model.enable_cache()
         
-        result = super().test(test_loader, plot_predictions=config.show_plot ,config=config)
+        result = super().test(test_loader, show_plot=config.show_plot ,config=config)
         
         # 测试完成后禁用缓存
         if hasattr(self.model, 'disable_cache'):
@@ -399,6 +399,10 @@ class PhysicsModelTrainer(BaseTrainer):
         # 直接使用BaseTrainer的训练方法
         return super().train(train_loader, val_loader, config)
         
+    def test(self, test_loader, config=None):
+        """测试模型"""
+        return super().test(test_loader, show_plot=config.show_plot ,config=config)
+
     def plot_degradation_curve(self, show_plot):
         """
         绘制退化曲线
