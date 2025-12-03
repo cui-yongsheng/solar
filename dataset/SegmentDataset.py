@@ -5,7 +5,6 @@ import torch
 import os
 
 class SegmentDataset(Dataset):
-
     def __init__(self, data_dir='../data', normalize=True,
                  segment_length=None, feature_columns=None, custom_raw_features=None):
         """
@@ -38,6 +37,7 @@ class SegmentDataset(Dataset):
         self.num_days = 0
         self.T = segment_length # segment特征长度（神经网络部分）
         self.F = 0              # segment特征维度（神经网络部分）
+        self.mask = None        # 每个样本在序列维度上的真实数据掩码（1=真实,0=填充）
         
         # 检查数据目录是否存在
         if not os.path.exists(data_dir):
@@ -111,11 +111,11 @@ class SegmentDataset(Dataset):
         # 提取自定义原始特征数据（用于物理计算）
         custom_columns_config = self.custom_raw_features or default_custom_raw_features
         all_custom_columns = []
-        for name, columns in custom_columns_config.items():
+        for _ , columns in custom_columns_config.items():
             all_custom_columns.extend(columns)
         self.physical_features = combined_data[all_custom_columns].values.astype(np.float32)
         # 处理时间特征，将其拆分为年、月、日并进行编码
-        time_features , time_features_raw = self._process_time_features(combined_data)
+        _ , time_features_raw = self._process_time_features(combined_data)
         if time_features_raw is not None:
             self.physical_features = np.concatenate([self.physical_features, time_features_raw], axis=1)
 
@@ -125,8 +125,6 @@ class SegmentDataset(Dataset):
         for _ , columns in columns_config.items():
             all_feature_columns.extend(columns)
         features = combined_data[all_feature_columns].values.astype(np.float32)
-        # if time_features is not None:
-        #     features = np.concatenate([features, time_features], axis=1)
         self.F = features.shape[1]
         # 存储处理后的特征以供后续使用
         self._processed_features = features
@@ -213,6 +211,8 @@ class SegmentDataset(Dataset):
         # 预先分配numpy数组以提高性能
         feature_np = np.empty((total_samples, self.T, self.F), dtype=np.float32)
         current_np = np.empty((total_samples, self.T), dtype=np.float32)
+        # 掩码：1 表示真实数据位置，0 表示填充位置
+        mask_np = np.zeros((total_samples, self.T), dtype=np.float32)
         
         for i, (feat, curr) in enumerate(zip(segment_features, segment_current)):
             seq_len = len(feat)
@@ -220,6 +220,7 @@ class SegmentDataset(Dataset):
                 # 如果序列长度大于等于目标长度，则截断
                 feature_np[i, :, :] = feat[:self.T, :]
                 current_np[i, :] = curr[:self.T]
+                mask_np[i, :] = 1.0
             else:
                 # 如果序列长度小于目标长度，则进行填充
                 # 使用最后一行进行填充（复制最后一行）
@@ -228,10 +229,13 @@ class SegmentDataset(Dataset):
                 
                 current_np[i, :seq_len] = curr
                 current_np[i, seq_len:] = np.full(self.T - seq_len, curr[-1])  # 用最后一个值填充剩余部分
+                mask_np[i, :seq_len] = 1.0
         
         # 一次性转换为torch tensor以减少开销
         self.nn_features = torch.from_numpy(feature_np)
         self.labels = torch.from_numpy(current_np)
+        # 转换 mask
+        self.mask = torch.from_numpy(mask_np)
         
         # 处理物理特征数据
         physical_features = np.empty((total_samples, self.T, self.physical_features.shape[1]), dtype=np.float32)
@@ -244,13 +248,12 @@ class SegmentDataset(Dataset):
             if seq_len >= self.T:
                 # 如果序列长度大于等于目标长度，则截断
                 physical_features[i, :, :] = self.physical_features[current_physical_idx:current_physical_idx+self.T, :]
-                current_physical_idx += self.T
             else:
                 # 如果序列长度小于目标长度，则进行填充
                 # 使用最后一行进行填充（复制最后一行）
                 physical_features[i, :seq_len, :] = self.physical_features[current_physical_idx:current_physical_idx+seq_len, :]
                 physical_features[i, seq_len:, :] = np.tile(self.physical_features[current_physical_idx+seq_len-1:current_physical_idx+seq_len, :], (self.T - seq_len, 1))
-                current_physical_idx += seq_len
+            current_physical_idx += seq_len
         
         self.physical_features = torch.from_numpy(physical_features)
 
@@ -265,7 +268,7 @@ class SegmentDataset(Dataset):
         idx: 数据索引
         
         返回:
-        (normalized_features, label, day_id) 归一化特征、标签和day_id
+        (normalized_features, label, day_id, mask) 归一化特征、标签、day_id 和掩码（mask 形状为 [T,1]）
         """
         # 检查索引是否有效
         if idx < 0 or idx >= len(self.valid_samples):
@@ -273,10 +276,11 @@ class SegmentDataset(Dataset):
             
         features = self.processed_features[idx]  # [T, F]
         label = self.labels[idx].unsqueeze(-1)  # [T, 1]
+        mask = self.mask[idx].unsqueeze(-1) if self.mask is not None else None  # [T, 1]
         # 直接从valid_samples获取day_id以减少解包开销
         day_id = self.valid_samples[idx][0]  # int, 用于 health embedding
 
-        return features, label, day_id
+        return features, label, day_id, mask
         
     def get_item_with_raw_features(self, idx):
         """
@@ -286,7 +290,7 @@ class SegmentDataset(Dataset):
         idx: 数据索引
         
         返回:
-        (normalized_features, raw_features, label, day_id) 归一化特征、原始特征、标签和day_id
+        (normalized_features, raw_features, label, day_id, mask) 归一化特征、原始特征、标签、day_id 和掩码（mask 形状为 [T,1]）
         """
         # 检查索引是否有效
         if idx < 0 or idx >= len(self.valid_samples):
@@ -295,10 +299,11 @@ class SegmentDataset(Dataset):
         normalized_features = self.processed_features[idx]  # [T, F]
         label = self.labels[idx].unsqueeze(-1)  # [T, 1]
         raw_features = self.physical_features[idx] if self.physical_features is not None else None  # [T, F_raw]
+        mask = self.mask[idx].unsqueeze(-1) if self.mask is not None else None  # [T, 1]
         # 直接从valid_samples获取day_id以减少解包开销
         day_id = self.valid_samples[idx][0]  # int, 用于 health embedding
 
-        return normalized_features, raw_features, label, day_id
+        return normalized_features, raw_features, label, day_id, mask
         
     def compute_normalization_params(self, indices=None):
         """
@@ -310,16 +315,30 @@ class SegmentDataset(Dataset):
             # 使用所有样本的所有数据计算归一化参数
             if self.nn_features is None:
                 raise ValueError("X_all 未初始化")
+            # 展平特征和 mask
             features = self.nn_features.reshape(-1, self.F)
+            if self.mask is not None:
+                mask_flat = self.mask.reshape(-1).bool()
+                # 只保留真实数据位置
+                if mask_flat.sum().item() == 0:
+                    raise ValueError("没有真实数据用于计算归一化参数")
+                features = features[mask_flat]
 
         else:
             # 根据指定索引计算归一化参数
             if self.nn_features is None:
                 raise ValueError("X_all 未初始化")
-            if not indices:
+            # 检查 indices 是否为空
+            if len(indices) == 0:
                 raise ValueError("indices 不能为空")
             selected_features = self.nn_features[indices]
             features = selected_features.reshape(-1, self.F)
+            # 如果有 mask，则只使用被选中样本中的真实位置
+            if self.mask is not None:
+                selected_mask = self.mask[indices].reshape(-1).bool()
+                if selected_mask.sum().item() == 0:
+                    raise ValueError("在所选索引中没有真实数据用于计算归一化参数")
+                features = features[selected_mask]
 
         # 计算最小值和最大值，使用更高效的torch函数
         self.feature_min = torch.amin(features, dim=0)
