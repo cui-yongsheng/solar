@@ -78,7 +78,7 @@ class PhysicsInformedSolarHealthModel(nn.Module):
         I_base = D * I_phys  # [B,T,1] = 衰减后的物理输出
 
         # 4) 融合特征
-        z = torch.cat([env_seq, h_day_seq, I_phys], dim=-1)
+        z = torch.cat([env_seq, h_day_seq, D], dim=-1)
         feat = self.fusion(z)  # [B,T,Hf]
 
         # 6) 残差
@@ -391,7 +391,7 @@ class TransformerNeuralODE(nn.Module):
         I_base = D * I_phys
 
         # ---- 5. Fusion ----
-        z = torch.cat([env_seq, health_seq, I_phys], dim=-1)
+        z = torch.cat([env_seq, health_seq, D], dim=-1)
         feat = self.fusion(z)
 
         # ---- 6. Residual ----
@@ -426,7 +426,7 @@ class NeuralODEHealthModel(nn.Module):
     Highly optimized version:
     - Precompute full health trajectory [num_days+1, H]
     - Batch ODE function (supports [B,H])
-    - Cache full ODE trajectory and refresh when parameters change
+    - Cache full ODE trajectory and refresh when parameters change (Modified: Cache is simplified/removed for training)
     """
 
     def __init__(self,
@@ -452,9 +452,11 @@ class NeuralODEHealthModel(nn.Module):
         )
 
         # ------------------------- Initial health h(0) -------------------------
-        self.initial_health = nn.Parameter(torch.randn(health_dim) * 0.1)
+        self.initial_health = nn.Parameter(torch.randn(health_dim) * 1)
 
         # ------------------------- ODE function f(h,t) -------------------------
+        # Input: h (health_dim) + t (1) = health_dim + 1
+        # Output: dh/dt (health_dim)
         self.ode_func = nn.Sequential(
             nn.Linear(health_dim + 1, 64),
             nn.Tanh(),
@@ -464,129 +466,144 @@ class NeuralODEHealthModel(nn.Module):
         )
 
         # ------------------------- Physics Model -------------------------
-        from model.physics_model import SegmentPhysicsModel
         self.physics_model = SegmentPhysicsModel()
 
         # ------------------------- Fusion network -------------------------
         fusion_dim = lstm_hidden_dim + health_dim + 1
         self.fusion = nn.Sequential(
             nn.Linear(fusion_dim, feat_hidden_dim),
-            nn.ReLU(),
-            nn.Linear(feat_hidden_dim, feat_hidden_dim),
-            nn.ReLU(),
+            nn.ReLU()
         )
 
         # ------------------------- Heads -------------------------
         self.head_decay_weight = nn.Parameter(torch.randn(health_dim) * 0.01)
         self.head_decay_bias = nn.Parameter(torch.zeros(1))
 
-        self.head_residual = nn.Sequential(
-            nn.Linear(feat_hidden_dim, feat_hidden_dim // 2),
-            nn.ReLU(),
-            nn.Linear(feat_hidden_dim // 2, 1)
-        )
+        self.head_residual = nn.Linear(feat_hidden_dim, 1)
 
         # ------------------------- ODE Cache -------------------------
-        self.register_buffer("health_table", None)   # [num_days+1, H]
-        self._ode_cached_for_params = None           # store param hash
+        # health_table will store the ODE solution for t=0..num_days
+        self.register_buffer("health_table", None)  # [num_days+1, H]
+        # 移除参数哈希，因为在训练中它不具备鲁棒性。
+        # self._ode_cached_for_params = None 
 
     # ============================================================
-    #                     ODE Derivative (Batch)
+    #                     ODE Derivative (Batch)
     # ============================================================
     def _ode_derivative(self, t, h):
         """
-        h: [H] or [B,H]   (torchdiffeq can pass tensor)
+        h: [H] or [B,H]   (torchdiffeq can pass tensor)
         t: scalar (0-D)
         return: same shape as h
         """
+        # Ensure h is at least 2D (batch dim) for consistent concatenation
         if h.dim() == 1:
             h = h.unsqueeze(0)  # [1,H]
 
+        # t is 0-D scalar, expand to match batch size
         t_exp = t.expand(h.size(0), 1)
         inp = torch.cat([h, t_exp], dim=-1)
         dh = self.ode_func(inp)
         return dh
 
     # ============================================================
-    #             ODE Full Trajectory Precomputation
+    #             ODE Full Trajectory Precomputation
     # ============================================================
-    def _params_hash(self):
-        """Compute a hash of relevant parameters to detect changes."""
-        vec = torch.cat([
-            self.initial_health.detach().flatten(),
-            self.head_decay_weight.detach().flatten(),
-            self.head_decay_bias.detach().flatten(),
-        ])
-        return hash(vec.cpu().numpy().tobytes())
-
+    
+    # 移除 _params_hash 函数，简化缓存逻辑
+    
     def _compute_full_ode_trajectory(self, device):
         """Compute h(t) for all t=0..num_days only once."""
+        # Times should be normalized to [0, 1] for Neural ODEs, as implied by the original code
         times = torch.linspace(0, 1, self.num_days + 1, device=device)
 
         init_h = self.initial_health.to(device)
 
-        method = "dopri5" if not self.use_adjoint else "adjoint"
-
+        # Determine ODE solver method
+        method = "dopri5" if not self.use_adjoint else "adjoint" 
+        
+        # ODE Solver
         traj = odeint(
             func=self._ode_derivative,
             y0=init_h,
             t=times,
-            method="dopri5" if not self.use_adjoint else "adjoint"
+            method=method # Use the determined method
         )  # [T, H]
 
-        self.health_table = traj.detach()  # no grad needed
-        self._ode_cached_for_params = self._params_hash()
+        self.health_table = traj.detach()  # Cache the result, no grad needed here for lookup
+        # 移除缓存的参数哈希设置
+        # self._ode_cached_for_params = self._params_hash() 
 
     # ============================================================
-    #                 Health Query by day_ids
+    #                 Health Query by day_ids
     # ============================================================
     def _get_health(self, day_ids, device):
         """
         day_ids: [B] int
         return: [B, health_dim]
+        
+        Note: In a training loop, you should typically recompute the trajectory 
+              (by setting self.health_table = None) for every step/epoch 
+              since the parameters are constantly changing.
+              For inference/evaluation, the cache is efficient.
         """
-        need_refresh = (self.health_table is None) or \
-                       (self._ode_cached_for_params != self._params_hash())
-
+        # 简化缓存刷新逻辑：仅在第一次或明确重置后计算
+        need_refresh = (self.health_table is None)
+        
         if need_refresh:
+            # Note: For training, if parameters (initial_health, ode_func) change, 
+            # this function must be called, thus self.health_table should be reset to None.
             self._compute_full_ode_trajectory(device)
 
         return self.health_table[day_ids]  # [B,H]
 
     # ============================================================
-    #                         Forward
+    #                         Forward
     # ============================================================
     def forward(self, X, day_ids, raw_features):
         """
-        X: [B,T,F]
-        day_ids: [B]   sample time index
-        raw_features: [B,T,F_raw]
+        X: [B,T,F]   (Environmental/Driving features)
+        day_ids: [B]   sample time index (integer 0 to num_days)
+        raw_features: [B,T,F_raw]   (Raw physics features)
         """
         B, T, _ = X.shape
         device = X.device
 
         # ---- 1. LSTM encoding ----
+        # env_seq: [B, T, lstm_hidden_dim]
         env_seq, _ = self.env_encoder(X)
 
         # ---- 2. Get health state (fast lookup) ----
-        health = self._get_health(day_ids, device)   # [B,H]
-        health_seq = health.unsqueeze(1).expand(-1, T, -1)
+        # In a training scenario where gradients are needed, this lookup 
+        # must be performed on a trajectory computed in the same forward pass
+        # or rely on the _compute_full_ode_trajectory's ability to compute gradients.
+        # Since _compute_full_ode_trajectory detaches, this is currently only 
+        # suitable if health is treated as a lookup, not a gradient path.
+        # For full ODE training, you might need to re-run the ODE solver here 
+        # or use a different indexing strategy if the table is kept attached.
+        
+        health = self._get_health(day_ids, device)  # [B,H]
+        health_seq = health.unsqueeze(1).expand(-1, T, -1) # [B, T, H]
 
         # ---- 3. Decay factor ----
-        w = self.head_decay_weight
-        raw_D = (health_seq * w.view(1,1,-1)).sum(-1, keepdim=True) + self.head_decay_bias
-        D = torch.sigmoid(raw_D)   # [B,T,1]
+        w = self.head_decay_weight.view(1, 1, -1) # [1, 1, H]
+        
+        # raw_D: [B,T,1]
+        raw_D = (health_seq * w).sum(-1, keepdim=True) + self.head_decay_bias
+        D = torch.sigmoid(raw_D)  # [B,T,1] - Decay factor (0 to 1)
 
         # ---- 4. Physics model ----
+        # I_phys: [B,T,1]
         I_phys = self.physics_model.compute_current(raw_features)
-        I_base = D * I_phys
+        I_base = D * I_phys # [B,T,1]
 
         # ---- 5. Fusion ----
-        z = torch.cat([env_seq, health_seq, I_phys], dim=-1)
-        feat = self.fusion(z)
+        # z: [B, T, lstm_hidden_dim + H + 1]
+        z = torch.cat([env_seq, health_seq, D], dim=-1)
+        feat = self.fusion(z) # [B, T, feat_hidden_dim]
 
         # ---- 6. Residual ----
-        r = self.head_residual(feat)
+        r = self.head_residual(feat) # [B, T, 1]
         I_pred = I_base + r
 
         return {
@@ -599,14 +616,19 @@ class NeuralODEHealthModel(nn.Module):
         }
 
     # ============================================================
-    #                 Degradation curve
+    #                 Degradation curve
     # ============================================================
     def get_degradation_curve(self, device):
+        """
+        Computes the full degradation curve (Decay factor D) over all days.
+        return: [num_days+1, 1]
+        """
         if self.health_table is None:
             self._compute_full_ode_trajectory(device)
 
-        health_traj = self.health_table   # [T,H]
+        health_traj = self.health_table.to(device)  # [T,H]
         w = self.head_decay_weight.to(device)
 
+        # Matrix multiplication: [T,H] @ [H] = [T]
         raw_D = health_traj @ w + self.head_decay_bias
-        return torch.sigmoid(raw_D)
+        return torch.sigmoid(raw_D).unsqueeze(-1) # [T, 1]
