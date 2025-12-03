@@ -21,7 +21,6 @@ def create_data_loaders(args):
     dataset = SegmentDataset(data_dir='./data', normalize=False)
     train_size = int(0.8 * len(dataset))
     val_size = int(0.1 * len(dataset))
-    test_size = len(dataset) - train_size - val_size
     
     if args.few_shot:
         # Few-shot learning: randomly sample a small subset for training
@@ -242,15 +241,15 @@ def perform_cross_validation(args, dataset, device):
             raise ValueError(f"无法为模型类型 {args.model_type} 创建训练器")
         
         # 训练模型
-        history = trainer.train(
-            train_loader=train_loader,
-            val_loader=val_loader,
-            config=args
-        )
-        
+        trainer.train(train_loader=train_loader,val_loader=val_loader,config=args)
+        # 绘制损失曲线
+        if args.show_plot:
+            trainer.plot_losses()
         # 评估模型
         val_results = trainer.test(val_loader, config=args)
-        
+        # 绘制退化曲线（仅适用于特定模型）
+        if args.model_type in ['segment_pinn', 'neural_ode']:
+            trainer.plot_degradation_curve(args.show_plot)
         # 存储结果
         cv_results.append({
             'fold': fold + 1,
@@ -399,8 +398,8 @@ def train_and_evaluate(args, trainer, train_loader, val_loader, test_loader, mod
         print(f"决定系数 (R²): {test_results['r2']:.6f}")
         
         # 绘制退化曲线（仅适用于特定模型）
-        if args.show_plot and (args.model_type in ['segment_pinn', 'neural_ode']):
-            trainer.plot_degradation_curve()
+        if args.model_type in ['segment_pinn', 'neural_ode']:
+            trainer.plot_degradation_curve(args.show_plot)
         
         return history, test_results
 
