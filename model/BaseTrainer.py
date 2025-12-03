@@ -269,24 +269,52 @@ class BaseTrainer:
 
         with torch.no_grad():
             test_pbar = tqdm(test_loader, desc='Testing')
+            # 用于追踪每个 day_id 的段落计数（用以区分相同 day_id 的不同段落）
+            day_segment_counter = {}
+            
             for batch_idx, batch_data in enumerate(test_pbar):
-                pred, actual, loss = self._predict_and_evaluate(batch_data, criterion, config)
+                pred, actual, mask, day_ids, loss = self._predict_and_evaluate(batch_data, criterion, config)
                 test_loss += loss.item()
 
-                # 记录预测值和实际值
+                # 转换为 numpy
                 pred_np = pred.cpu().numpy()
                 actual_np = actual.cpu().numpy()
                 
-                predictions.extend(pred_np)
-                actuals.extend(actual_np)
+                mask_np = mask.cpu().numpy()
+                # 处理 mask 维度：可能为 [B, T, 1] 或 [B, T]
+                # 如果最后一维为1（例如 [B, T, 1]），则去掉最后一维，保证 mask 与 pred 的时间维对齐
+                # 采用基于最后一维是否为1的判断比比较 ndim 更稳健，能处理 (B,T,1) -> (B,T) 的情况
+                if mask_np.ndim >= 1 and mask_np.shape[-1] == 1:
+                    mask_np = mask_np.squeeze(-1)
                 
-                # 为每个样本生成索引
-                batch_size = pred_np.shape[0] if pred_np.ndim > 0 else 1
-                # 记录每个样本的索引，并扩展以匹配展平后的数据
-                for i in range(batch_size):
-                    elements_per_sample = pred_np[i].size if pred_np.ndim > 1 else pred_np.size // batch_size
-                    sample_indices.extend([i] * elements_per_sample)
+                day_ids_np = day_ids.cpu().numpy() if day_ids is not None else None
                 
+                # 按样本遍历，只保留真实位置（mask==1）的数据
+                B = pred_np.shape[0]
+                for i in range(B):
+                    valid = mask_np[i].astype(bool)
+                    pred_i = pred_np[i][valid]
+                    actual_i = actual_np[i][valid]
+                    
+                    predictions.extend(pred_i.flatten())
+                    actuals.extend(actual_i.flatten())
+                    
+                    # 生成复合标识符：day_id_segment_id（用以区分相同 day_id 的不同段落）
+                    if day_ids_np is not None:
+                        day_id_val = day_ids_np[i]
+                    else:
+                        day_id_val = i
+                    
+                    # 追踪该 day_id 的段落计数
+                    if day_id_val not in day_segment_counter:
+                        day_segment_counter[day_id_val] = 0
+                    seg_count = day_segment_counter[day_id_val]
+                    day_segment_counter[day_id_val] += 1
+                    
+                    # 生成复合标识符：day_id_segment_id
+                    composite_id = f"{int(day_id_val)}_{seg_count}"
+                    sample_indices.extend([composite_id] * len(pred_i))
+
                 test_pbar.set_postfix({'Batch Loss': f'{loss.item():.6f}'})
 
         test_loss /= len(test_loader)
@@ -304,17 +332,14 @@ class BaseTrainer:
         mape = mean_absolute_percentage_error(actuals_flat, predictions_flat)
 
         # 格式化输出结果
-        if plot_predictions:
-            self._print_test_results(test_loss, mse, rmse, mae, r2, mape)
+        self._print_test_results(test_loss, mse, rmse, mae, r2, mape)
 
         # 绘制预测vs实际值图
-        if plot_predictions:
-            self._plot_predictions(actuals_flat, predictions_flat, save_plots)
+        self._plot_predictions(actuals_flat, predictions_flat, plot_predictions)
 
         # 绘制误差分布图
-        if plot_predictions:
-            self._plot_error_distribution(actuals_flat, predictions_flat, save_plots)
-
+        self._plot_error_distribution(actuals_flat, predictions_flat, plot_predictions)
+        
         # 保存测试结果到文件
         if save_results and self.save_path:
             self._save_test_results(test_loss, mse, rmse, mae, r2, mape, predictions_flat, actuals_flat, sample_ids)
@@ -340,7 +365,12 @@ class BaseTrainer:
         config: 配置对象
 
         返回:
-        (预测值, 实际值, 损失)
+        一个包含五个元素的元组: `(pred, actual, mask, day_ids, loss)`。
+        - `pred`: 模型预测值的 Tensor，形状通常为 [B, T] 或 [B, T, 1]
+        - `actual`: 真实值的 Tensor，形状与 `pred` 对应
+        - `mask`: 表示有效位置的掩码 Tensor，形状可能为 [B, T] 或 [B, T, 1]
+        - `day_ids`: 每个样本对应的 day_id（可选），形状通常为 [B,]
+        - `loss`: 本批次的损失（标量 Tensor）
         """
         raise NotImplementedError("子类必须实现 _predict_and_evaluate 方法")
 
@@ -439,7 +469,7 @@ class BaseTrainer:
         print(f'决定系数 (R²):      {r2:.6f}')
         print('=' * 50)
 
-    def _plot_predictions(self, actuals, predictions, save_plots=True):
+    def _plot_predictions(self, actuals, predictions, plot_predictions=True):
         """
         绘制预测值与实际值的对比图
         """
@@ -450,11 +480,12 @@ class BaseTrainer:
         plt.ylabel('Predicted Values')
         plt.title('Predicted vs Actual Values')
         plt.grid(True)
-        if save_plots and self.save_path:
+        if self.save_path:
             plt.savefig(os.path.join(self.save_path, 'prediction_vs_actual.png'), dpi=300, bbox_inches='tight')
-        plt.show()
+        if plot_predictions:
+            plt.show()
 
-    def _plot_error_distribution(self, actuals, predictions, save_plots=True):
+    def _plot_error_distribution(self, actuals, predictions, plot_predictions=True):
         """
         绘制误差分布图
         """
@@ -465,11 +496,12 @@ class BaseTrainer:
         plt.ylabel('Frequency')
         plt.title('Prediction Error Distribution')
         plt.grid(True)
-        if save_plots and self.save_path:
+        if self.save_path:
             plt.savefig(os.path.join(self.save_path, 'error_distribution.png'), dpi=300, bbox_inches='tight')
-        plt.show()
+        if plot_predictions:
+            plt.show()
 
-    def plot_losses(self, save_plot=True):
+    def plot_losses(self, plot_predictions=True):
         """
         绘制训练和验证损失曲线
         """
@@ -481,6 +513,7 @@ class BaseTrainer:
         plt.legend()
         plt.title('Training Loss Curve')
         plt.grid(True)
-        if save_plot and self.save_path:
+        if self.save_path:
             plt.savefig(os.path.join(self.save_path, 'training_loss.png'), dpi=300, bbox_inches='tight')
-        plt.show()
+        if plot_predictions:
+            plt.show()
