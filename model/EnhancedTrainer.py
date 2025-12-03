@@ -6,7 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 
-## 针对点输入时的训练方式，目前不需要
+## 针对点输入时的训练方式
 class EnhancedNeuralNetworkTrainer(BaseTrainer):
     def __init__(self, model, save_path="./", device=torch.device("cpu")):
         super().__init__(model, save_path, device)
@@ -82,29 +82,49 @@ class EnhancedSegmentTrainer(BaseTrainer):
         
     def _compute_loss(self, batch_data, criterion, config=None):
         """计算分段模型损失"""
-        data, target, day_ids = batch_data
-        data, target, day_ids = data.to(self.device), target.to(self.device), day_ids.to(self.device)
-        
+        # 支持 dataset 返回 (data, target, day_ids) 或 (data, target, day_ids, mask)
+        data, target, day_ids, mask = batch_data
+        data = data.to(self.device)
+        target = target.to(self.device)
+        day_ids = day_ids.to(self.device)
+        mask = mask.to(self.device)
+
         output = self.model(data, day_ids)
         # 确保output和target形状一致
         if output.shape != target.shape:
             target = target.view_as(output)
-        loss = criterion(output, target)
-            
+
+        # 按真实位置计算MSE
+        eps = 1e-8
+        mse = (output - target) ** 2
+        masked = mse * mask
+        loss = masked.sum() / (mask.sum() + eps)
+
         return loss
 
     def _predict_and_evaluate(self, batch_data, criterion, config=None):
         """预测并评估单个批次"""
-        data, target, day_ids = batch_data
-        data, target, day_ids = data.to(self.device), target.to(self.device), day_ids.to(self.device)
-        
+        data, target, day_ids, mask = batch_data
+        data = data.to(self.device)
+        target = target.to(self.device)
+        day_ids = day_ids.to(self.device)
+        mask = mask.to(self.device)
+
         output = self.model(data, day_ids)
         # 确保output和target形状一致
         if output.shape != target.shape:
             target = target.view_as(output)
-        data_loss = criterion(output, target)
-        
-        return output, target, data_loss
+        # 使用 mask 布尔索引截取真实位置的预测与标签，然后计算损失
+        # mask 可能形状为 [B, T, 1] 或 [B, T]
+        # 如果最后一维是 1，则去掉以匹配 output/target 的时间维
+        if mask.dim() == output.dim() and mask.shape[-1] == 1:
+            mask = mask.squeeze(-1)
+        mask = mask.bool()
+        output_mask = output[mask]
+        target_mask = target[mask]
+        data_loss = ((output_mask - target_mask) ** 2).mean()
+
+        return output, target, mask, day_ids, data_loss
 
     def test(self, test_loader, config=None):
         """测试模型"""
@@ -116,11 +136,12 @@ class EnhancedSegmentPINNTrainer(BaseTrainer):
         super().__init__(model, save_path, device)
 
     def _compute_loss(self, batch_data, criterion=None, config=None):
-        normalized_features, raw_features, target, day_ids = batch_data
+        normalized_features, raw_features, target, day_ids, mask = batch_data
         normalized_features = normalized_features.to(self.device)
         raw_features = raw_features.to(self.device)
         target = target.to(self.device)
         day_ids = day_ids.to(self.device)
+        mask = mask.to(self.device)
 
         # ---------- Forward ----------
         output_dict = self.model(normalized_features, day_ids, raw_features)
@@ -132,15 +153,20 @@ class EnhancedSegmentPINNTrainer(BaseTrainer):
             target = target.view_as(I_pred)
 
         # ============================================================
-        # 1) 主数据损失（最终预测 I_pred）
+        # 1) 主数据损失（最终预测 I_pred），按真实位置计算
         # ============================================================
-        data_loss = F.mse_loss(I_pred, target)
+        eps = 1e-8
+        mse = (I_pred - target) ** 2
+        masked = mse * mask
+        data_loss = masked.sum() / (mask.sum() + eps)
 
         # 初始化总损失
         loss = data_loss
 
-        # 计算正则化项
-        res_reg = (r_pred ** 2).mean()
+        # 计算正则化项，应用mask
+        # 对r_pred应用mask以只考虑真实位置的残差
+        r_pred_masked = r_pred * mask
+        res_reg = (r_pred_masked ** 2).sum() / (mask.sum() + eps)
         lambda_r = getattr(config, 'lambda_r', 1e-2)
         
         # ============================================================
@@ -151,18 +177,48 @@ class EnhancedSegmentPINNTrainer(BaseTrainer):
         has_degradation = "D" in output_dict and "I_base" in output_dict
         if has_degradation:
             D = output_dict["D"]
-            eps = 1e-6
-            mask = (I_phys.abs() > eps)
+            eps = 3.5
+            mask_phy = (I_phys.abs() < eps)
+            # 结合数据mask和物理mask，确保使用布尔类型进行位运算
+            if mask.dim() == D.dim() and mask.shape[-1] == 1:
+                combined_mask = mask.squeeze(-1).bool() & mask_phy.squeeze(-1).bool()
+            else:
+                combined_mask = mask.bool() & mask_phy.bool()
+            
             D_tilde = torch.zeros_like(D)
-            D_tilde[mask] = (target[mask] / (I_phys[mask] + eps)).clamp(0.1, 2.0)
-
-            loss_D_supervise = F.mse_loss(D[mask], D_tilde[mask])
-            lambda_D_supervise = getattr(config, 'lambda_D_supervise', 1e-1)
-            loss = (
-                    data_loss
-                    + lambda_D_supervise * loss_D_supervise
-                    + lambda_r * res_reg
-            )
+            D_tilde[mask_phy] = (target[mask_phy] / (I_phys[mask_phy] + eps)).clamp(0.1, 2.0)
+            D_curve = self.model.get_degradation_curve(self.device)
+            # 添加衰减约束：鼓励D_curve随时间递减
+            D_decay_loss = 0.0
+            if len(D_curve) > 1:
+                # 计算相邻时间步的差异
+                D_curve_diff = D_curve[1:] - D_curve[:-1]
+                # 鼓励负差异（即衰减），使用relu函数惩罚正向变化
+                D_decay_loss = F.relu(D_curve_diff).mean()
+            
+            # 添加平滑约束：限制D_curve的变化幅度
+            D_smooth_loss = 0.0
+            if len(D_curve) > 2:
+                # 计算二阶差异（加速度）
+                D_curve_second_diff = D_curve[2:] - 2 * D_curve[1:-1] + D_curve[:-2]
+                D_smooth_loss = D_curve_second_diff.abs().mean()
+            # 从配置中获取权重
+            lambda_D_decay = getattr(config, 'lambda_D_decay', 1e-3)
+            lambda_D_smooth = getattr(config, 'lambda_D_smooth', 1e-3)
+            # 应用combined_mask计算损失
+            if combined_mask.sum() > 0:
+                loss_D_supervise = F.mse_loss(D[combined_mask], D_tilde[combined_mask])
+                lambda_D_supervise = getattr(config, 'lambda_D_supervise', 1e-2)
+                loss = (
+                        data_loss
+                        + lambda_D_supervise * loss_D_supervise
+                        + lambda_r * res_reg
+                        + lambda_D_decay * D_decay_loss
+                        + lambda_D_smooth * D_smooth_loss
+                )
+            else:
+                # 如果没有有效的mask位置，则只使用data_loss和res_reg
+                loss = data_loss + lambda_r * res_reg
         else:
             # 对于无退化因子的模型，只添加残差正则项
             loss = data_loss + lambda_r * res_reg
@@ -170,21 +226,31 @@ class EnhancedSegmentPINNTrainer(BaseTrainer):
 
     def _predict_and_evaluate(self, batch_data, criterion, config=None):
         """预测并评估单个批次"""
-        normalized_features, raw_features, target, day_ids = batch_data
+        normalized_features, raw_features, target, day_ids, mask = batch_data
         normalized_features = normalized_features.to(self.device)
         raw_features = raw_features.to(self.device)
         target = target.to(self.device)
         day_ids = day_ids.to(self.device)
-        
+        mask = mask.to(self.device)
+
         # 模型输出
         output_dict = self.model(normalized_features, day_ids, raw_features)
         output = output_dict["I_pred"]
         # 确保output和target形状一致
         if output.shape != target.shape:
             target = target.view_as(output)
-        data_loss = nn.MSELoss()(output, target)
-        
-        return output, target, data_loss
+
+        # 使用 mask 布尔索引截取真实位置的预测与标签，然后计算损失
+        # mask 可能形状为 [B, T, 1] 或 [B, T]
+        # 如果最后一维是 1，则去掉以匹配 output/target 的时间维
+        if mask.dim() == output.dim() and mask.shape[-1] == 1:
+            mask = mask.squeeze(-1)
+        mask = mask.bool()
+        output_mask = output[mask]
+        target_mask = target[mask]
+        data_loss = ((output_mask - target_mask) ** 2).mean()
+
+        return output, target, mask, day_ids, data_loss
         
     def test(self, test_loader, config=None):
         """测试模型"""
@@ -258,22 +324,25 @@ class PhysicsModelTrainer(BaseTrainer):
         返回:
         损失值
         """
-        normalized_features, raw_features, target, day_ids = batch_data
+        normalized_features, raw_features, target, day_ids, mask = batch_data
         normalized_features = normalized_features.to(self.device)
         raw_features = raw_features.to(self.device)
         target = target.to(self.device)
         day_ids = day_ids.to(self.device)
+        mask = mask.to(self.device)
 
         # 模型前向传播
         output_dict = self.model(normalized_features, day_ids, raw_features)
         output = output_dict["I_pred"]
-        
+
         # 确保输出和目标形状一致
         if output.shape != target.shape:
             target = target.view_as(output)
-            
-        # 计算损失
-        loss = criterion(output, target)
+
+        eps = 1e-8
+        mse = (output - target) ** 2
+        masked = mse * mask
+        loss = masked.sum() / (mask.sum() + eps)
         return loss
 
     def _predict_and_evaluate(self, batch_data, criterion, config=None):
@@ -288,11 +357,12 @@ class PhysicsModelTrainer(BaseTrainer):
         返回:
         (预测值, 实际值, 损失)
         """
-        normalized_features, raw_features, target, day_ids = batch_data
+        normalized_features, raw_features, target, day_ids, mask = batch_data
         normalized_features = normalized_features.to(self.device)
         raw_features = raw_features.to(self.device)
         target = target.to(self.device)
         day_ids = day_ids.to(self.device)
+        mask = mask.to(self.device)
         
         # 模型前向传播
         output_dict = self.model(normalized_features, day_ids, raw_features)
@@ -303,9 +373,17 @@ class PhysicsModelTrainer(BaseTrainer):
             target = target.view_as(output)
             
         # 计算损失
-        loss = criterion(output, target)
-        
-        return output, target, loss
+        # 使用 mask 布尔索引截取真实位置的预测与标签，然后计算损失
+        # mask 可能形状为 [B, T, 1] 或 [B, T]
+        # 如果最后一维是 1，则去掉以匹配 output/target 的时间维
+        if mask.dim() == output.dim() and mask.shape[-1] == 1:
+            mask = mask.squeeze(-1)
+        mask = mask.bool()
+        output_mask = output[mask]
+        target_mask = target[mask]
+        data_loss = ((output_mask - target_mask) ** 2).mean()
+
+        return output, target, mask, day_ids, data_loss
 
     def train(self, train_loader, val_loader, config=None):
         """
