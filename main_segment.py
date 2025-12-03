@@ -1,15 +1,15 @@
-import numpy as np
 from sklearn.model_selection import TimeSeriesSplit
-from dataset.SegmentDataset import SegmentDataset
+from dataset.SegmentDataset import SegmentDataset, RawFeatureDatasetWrapper
+from model.ml_models import MLRandomForest, MLSVM, MLLinearRegression, convert_torch_dataset_to_numpy, evaluate_ml_model, save_ml_test_results
 from model.EnhancedTrainer import EnhancedSegmentPINNTrainer,EnhancedSegmentTrainer, PhysicsModelTrainer
 from model.segment_nn import SolarHealthModel, SimpleSolarModel, GRUSolarModel, CNNLSTMSolarModel, TransformerSolarModel
 from model.segment_pinn import PhysicsInformedSolarHealthModel, PhysicsInformedSolarHealthModelNoDegradation
 from model.segment_pinn import NeuralODEHealthModel, TransformerNeuralODE
 from model.segment_physics import PhysicsOnlyModel
-from model.ml_models import MLRandomForest, MLSVM, MLLinearRegression, convert_torch_dataset_to_numpy, evaluate_ml_model, save_ml_test_results
 from utils.utils import set_random_seed, save_code
 from torch.utils.data import DataLoader, Subset
 from utils.args import get_args
+import numpy as np
 import random
 import torch
 import os
@@ -75,16 +75,6 @@ def create_data_loaders(args):
     # 为需要原始特征的模型创建支持原始特征的数据集包装器
     if args.model_type in ['segment_pinn', 'neural_ode', 'transformer_neural_ode', 'cnn_gru_neural_ode', 'segment_pinn_nodegradation', 'physics_model']:
         # 为训练器创建支持原始特征的数据集包装器
-        class RawFeatureDatasetWrapper(torch.utils.data.Dataset):
-            def __init__(self, dataset, indices):
-                self.dataset = dataset
-                self.indices = indices
-            def __len__(self):
-                return len(self.indices)
-            def __getitem__(self, idx):
-                # 获取包含原始特征的数据
-                normalized_features, raw_features, label, day_id, mask = self.dataset.get_item_with_raw_features(self.indices[idx])
-                return normalized_features, raw_features, label, day_id, mask
 
         # 创建包装后的数据集
         train_dataset_with_raw = RawFeatureDatasetWrapper(dataset, train_dataset.indices)
@@ -233,16 +223,6 @@ def perform_cross_validation(args, dataset, device):
         
         # 创建数据加载器
         if args.model_type in ['segment_pinn', 'neural_ode', 'transformer_neural_ode', 'cnn_gru_neural_ode', 'segment_pinn_nodegradation', 'physics_model']:
-            class RawFeatureDatasetWrapper(torch.utils.data.Dataset):
-                def __init__(self, dataset, indices):
-                    self.dataset = dataset
-                    self.indices = indices
-                def __len__(self):
-                    return len(self.indices)
-                def __getitem__(self, idx):
-                    normalized_features, raw_features, label, day_id, mask = self.dataset.get_item_with_raw_features(self.indices[idx])
-                    return normalized_features, raw_features, label, day_id, mask
-
             train_dataset_with_raw = RawFeatureDatasetWrapper(dataset, train_dataset.indices)
             val_dataset_with_raw = RawFeatureDatasetWrapper(dataset, val_dataset.indices)
 
