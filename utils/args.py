@@ -19,13 +19,17 @@ def get_args():
     parser.add_argument('--optimizer_type', type=str, default="adam",
                               choices=['adam', 'sgd'], help='优化器类型')
     parser.add_argument('--weight_decay', type=float, default=0.0, help='权重衰减')
-    
+    parser.add_argument('--lambda_r', type=float, default=1e-1, help='残差系数')
+    parser.add_argument('--lambda_D_supervise', type=float, default=1e-1, help='弱监督参数')
+    parser.add_argument('--lambda_D_decay', type=float, default=1e-3, help='衰减约束')
+    parser.add_argument('--lambda_D_smooth', type=float, default=1e-3, help='平滑约束')
+
     # 数据集参数
     parser.add_argument('--few_shot', action='store_true', default=False, help='是否使用小样本训练')
     parser.add_argument('--shuffle_data', action='store_true', default=False, help='是否随机打乱数据集')
     
     # 交叉验证参数
-    parser.add_argument('--cross_validation', action='store_true', default=True, help='启用时间序列交叉验证')
+    parser.add_argument('--cross_validation', action='store_true', default=False, help='启用时间序列交叉验证')
     parser.add_argument('--n_splits', type=int, default=5, help='交叉验证折数')
     
     # 模型参数
@@ -134,8 +138,6 @@ def save_args(arg):
         filename = os.path.join(arg.save_path, 'args.json')
         with open(filename, 'w') as f:
             json.dump(vars(arg), f, indent=4)
-        if hasattr(arg, 'verbose') and arg.verbose:
-            print(f"Arguments saved to {filename}")
     except Exception as e:
         print(f"Failed to save arguments: {e}", file=sys.stderr)
 
